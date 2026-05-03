@@ -1,2 +1,44 @@
 **/.DS_Store
 __pycache__/
+*.py[cod]
+
+# Local agent/tooling files
+.codex
+.agents/
+
+# Python environments and packaging
+.venv/
+venv/
+env/
+*.egg-info/
+
+# Logs and local run metadata
+*.log
+wandb/
+runs/
+
+# CLAM/WSI experiment outputs
+results/
+eval_results/
+features/
+patches/
+coords/
+masks/
+heatmaps/results/
+heatmaps/production_results/
+
+# Large generated artifacts
+*.h5
+*.hdf5
+*.pt
+*.pth
+*.ckpt
+
+# Whole-slide/image data generated or stored locally
+*.svs
+*.ndpi
+*.mrxs
+*.tif
+*.tiff
+*.ome.tif
+*.ome.tiff

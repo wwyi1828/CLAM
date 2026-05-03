@@ -7,6 +7,82 @@ from PIL import Image
 import math
 import cv2
 
+
+def _downsample_pair(value):
+    if isinstance(value, (tuple, list, np.ndarray)):
+        return (float(value[0]), float(value[1]))
+    scalar = float(value)
+    return (scalar, scalar)
+
+
+def _patch_level0_size(patch):
+    level0_patch_size = patch.get('level0_patch_size')
+    if level0_patch_size is not None:
+        return tuple(int(v) for v in level0_patch_size)
+
+    output_patch_size = int(patch.get('output_patch_size', np.array(patch['patch_PIL']).shape[0]))
+    downsample = _downsample_pair(patch['downsample'])
+    return (
+        int(round(output_patch_size * downsample[0])),
+        int(round(output_patch_size * downsample[1])),
+    )
+
+
+def _patch_level0_step(patch):
+    level0_step_size = patch.get('level0_step_size')
+    if level0_step_size is not None:
+        return tuple(int(v) for v in level0_step_size)
+
+    read_step_size = int(patch.get('read_step_size', patch.get('output_step_size', np.array(patch['patch_PIL']).shape[0])))
+    downsample = _downsample_pair(patch['downsample'])
+    return (
+        int(round(read_step_size * downsample[0])),
+        int(round(read_step_size * downsample[1])),
+    )
+
+
+def _image_dataset_attrs(patch):
+    output_patch_size = int(patch.get('output_patch_size', np.array(patch['patch_PIL']).shape[0]))
+    attrs = {
+        'patch_level': int(patch['patch_level']),
+        'patch_size': output_patch_size,
+        'output_patch_size': output_patch_size,
+        'read_patch_size': int(patch.get('read_patch_size', output_patch_size)),
+        'read_step_size': int(patch.get('read_step_size', output_patch_size)),
+        'wsi_name': patch['name'],
+        'downsample': patch['downsample'],
+        'level_dim': patch.get('level_dim'),
+        'level0_dim': patch.get('level0_dim', patch.get('level_dim')),
+        'downsampled_level_dim': patch.get('downsampled_level_dim', patch.get('level0_dim', patch.get('level_dim'))),
+        'level0_patch_size': _patch_level0_size(patch),
+        'level0_step_size': _patch_level0_step(patch),
+        'coord_level': int(patch.get('coord_level', 0)),
+        'magnification_strategy': patch.get('magnification_strategy', 'manual'),
+    }
+
+    optional_attrs = (
+        'target_mpp',
+        'planning_source_mpp',
+        'effective_output_mpp',
+        'source_magnification_estimate',
+        'target_magnification',
+    )
+    for key in optional_attrs:
+        value = patch.get(key)
+        if value is not None:
+            attrs[key] = value
+
+    return attrs
+
+
+def _coord_dataset_attrs(patch):
+    attrs = _image_dataset_attrs(patch).copy()
+    attrs.update({
+        'name': patch['name'],
+        'save_path': patch['save_path'],
+    })
+    return attrs
+
 def isWhitePatch(patch, satThresh=5):
     patch_hsv = cv2.cvtColor(patch, cv2.COLOR_RGB2HSV)
     return True if np.mean(patch_hsv[:,:,1]) < satThresh else False
@@ -33,7 +109,11 @@ def coord_generator(x_start, x_end, x_step, y_start, y_end, y_step, args_dict=No
                 yield (x,y)
 
 def savePatchIter_bag_hdf5(patch):
-    x, y, cont_idx, patch_level, downsample, downsampled_level_dim, level_dim, img_patch, name, save_path= tuple(patch.values())
+    x = int(patch['x'])
+    y = int(patch['y'])
+    img_patch = patch['patch_PIL']
+    name = patch['name']
+    save_path = patch['save_path']
     img_patch = np.array(img_patch)[np.newaxis,...]
     img_shape = img_patch.shape
 
@@ -51,6 +131,19 @@ def savePatchIter_bag_hdf5(patch):
 
     file.close()
 
+def savePatchAsImage(patch):
+    x = int(patch['x'])
+    y = int(patch['y'])
+    img_patch = patch['patch_PIL']
+    name = patch['name']
+    save_path = patch['save_path']
+
+    filename = os.path.join(save_path, name)
+    if not os.path.exists(filename):
+        os.makedirs(filename)
+    filename = os.path.join(filename, f"{x}_{y}.png")
+    img_patch.save(filename)
+
 def save_hdf5(output_path, asset_dict, attr_dict= None, mode='a'):
     file = h5py.File(output_path, mode)
     for key, val in asset_dict.items():
@@ -64,6 +157,8 @@ def save_hdf5(output_path, asset_dict, attr_dict= None, mode='a'):
             if attr_dict is not None:
                 if key in attr_dict.keys():
                     for attr_key, attr_val in attr_dict[key].items():
+                        if attr_val is None:
+                            continue
                         dset.attrs[attr_key] = attr_val
         else:
             dset = file[key]
@@ -73,7 +168,11 @@ def save_hdf5(output_path, asset_dict, attr_dict= None, mode='a'):
     return output_path
 
 def initialize_hdf5_bag(first_patch, save_coord=False):
-    x, y, cont_idx, patch_level, downsample, downsampled_level_dim, level_dim, img_patch, name, save_path = tuple(first_patch.values())
+    x = int(first_patch['x'])
+    y = int(first_patch['y'])
+    img_patch = first_patch['patch_PIL']
+    name = first_patch['name']
+    save_path = first_patch['save_path']
     file_path = os.path.join(save_path, name)+'.h5'
     file = h5py.File(file_path, "w")
     img_patch = np.array(img_patch)[np.newaxis,...]
@@ -82,19 +181,18 @@ def initialize_hdf5_bag(first_patch, save_coord=False):
     # Initialize a resizable dataset to hold the output
     img_shape = img_patch.shape
     maxshape = (None,) + img_shape[1:] #maximum dimensions up to which dataset maybe resized (None means unlimited)
-    dset = file.create_dataset('imgs', 
+    dset = file.create_dataset('imgs',
                                 shape=img_shape, maxshape=maxshape,  chunks=img_shape, dtype=dtype)
 
     dset[:] = img_patch
-    dset.attrs['patch_level'] = patch_level
-    dset.attrs['wsi_name'] = name
-    dset.attrs['downsample'] = downsample
-    dset.attrs['level_dim'] = level_dim
-    dset.attrs['downsampled_level_dim'] = downsampled_level_dim
+    for attr_key, attr_val in _image_dataset_attrs(first_patch).items():
+        dset.attrs[attr_key] = attr_val
 
     if save_coord:
         coord_dset = file.create_dataset('coords', shape=(1, 2), maxshape=(None, 2), chunks=(1, 2), dtype=np.int32)
         coord_dset[:] = (x,y)
+        for attr_key, attr_val in _coord_dataset_attrs(first_patch).items():
+            coord_dset.attrs[attr_key] = attr_val
 
     file.close()
     return file_path
@@ -110,7 +208,7 @@ def sample_indices(scores, k, start=0.48, end=0.52, convert_to_percentile=False,
     score_window = np.logical_and(scores >= start_value, scores <= end_value)
     indices = np.where(score_window)[0]
     if len(indices) < 1:
-        return -1 
+        return -1
     else:
         return np.random.choice(indices, min(k, len(indices)), replace=False)
 
@@ -123,7 +221,7 @@ def top_k(scores, k, invert=False):
 
 def to_percentiles(scores):
     from scipy.stats import rankdata
-    scores = rankdata(scores, 'average')/len(scores) * 100   
+    scores = rankdata(scores, 'average')/len(scores) * 100
     return scores
 
 def screen_coords(scores, coords, top_left, bot_right):
@@ -168,12 +266,12 @@ def DrawMap(canvas, patch_dset, coords, patch_size, indices=None, verbose=1, dra
     if verbose > 0:
         ten_percent_chunk = math.ceil(total * 0.1)
         print('start stitching {}'.format(patch_dset.attrs['wsi_name']))
-    
+
     for idx in range(total):
         if verbose > 0:
             if idx % ten_percent_chunk == 0:
                 print('progress: {}/{} stitched'.format(idx, total))
-        
+
         patch_id = indices[idx]
         patch = patch_dset[patch_id]
         patch = cv2.resize(patch, patch_size)
@@ -192,15 +290,15 @@ def DrawMapFromCoords(canvas, wsi_object, coords, patch_size, vis_level, indices
     total = len(indices)
     if verbose > 0:
         ten_percent_chunk = math.ceil(total * 0.1)
-        
+
     patch_size = tuple(np.ceil((np.array(patch_size)/np.array(downsamples))).astype(np.int32))
     print('downscaled patch size: {}x{}'.format(patch_size[0], patch_size[1]))
-    
+
     for idx in range(total):
         if verbose > 0:
             if idx % ten_percent_chunk == 0:
                 print('progress: {}/{} stitched'.format(idx, total))
-        
+
         patch_id = indices[idx]
         coord = coords[patch_id]
         patch = np.array(wsi_object.wsi.read_region(tuple(coord), vis_level, patch_size).convert("RGB"))
@@ -216,7 +314,9 @@ def StitchPatches(hdf5_file_path, downscale=16, draw_grid=False, bg_color=(0,0,0
     file = h5py.File(hdf5_file_path, 'r')
     dset = file['imgs']
     coords = file['coords'][:]
-    if 'downsampled_level_dim' in dset.attrs.keys():
+    if 'level0_dim' in dset.attrs.keys():
+        w, h = dset.attrs['level0_dim']
+    elif 'downsampled_level_dim' in dset.attrs.keys():
         w, h = dset.attrs['downsampled_level_dim']
     else:
         w, h = dset.attrs['level_dim']
@@ -228,19 +328,26 @@ def StitchPatches(hdf5_file_path, downscale=16, draw_grid=False, bg_color=(0,0,0
     print('number of patches: {}'.format(len(dset)))
     img_shape = dset[0].shape
     print('patch shape: {}'.format(img_shape))
-    downscaled_shape = (img_shape[1] // downscale, img_shape[0] // downscale)
+    if 'level0_patch_size' in dset.attrs.keys():
+        patch_shape = np.maximum(
+            1,
+            np.ceil(np.array(dset.attrs['level0_patch_size']) / downscale).astype(np.int32),
+        )
+        downscaled_shape = (int(patch_shape[0]), int(patch_shape[1]))
+    else:
+        downscaled_shape = (img_shape[1] // downscale, img_shape[0] // downscale)
 
-    if w*h > Image.MAX_IMAGE_PIXELS: 
+    if w*h > Image.MAX_IMAGE_PIXELS:
         raise Image.DecompressionBombError("Visualization Downscale %d is too large" % downscale)
-    
+
     if alpha < 0 or alpha == -1:
         heatmap = Image.new(size=(w,h), mode="RGB", color=bg_color)
     else:
         heatmap = Image.new(size=(w,h), mode="RGBA", color=bg_color + (int(255 * alpha),))
-    
+
     heatmap = np.array(heatmap)
     heatmap = DrawMap(heatmap, dset, coords, downscaled_shape, indices=None, draw_grid=draw_grid)
-    
+
     file.close()
     return heatmap
 
@@ -259,36 +366,40 @@ def StitchCoords(hdf5_file_path, wsi_object, downscale=16, draw_grid=False, bg_c
 
     print('downscaled size for stiching: {} x {}'.format(w, h))
     print('number of patches: {}'.format(len(coords)))
-    
-    patch_size = dset.attrs['patch_size']
-    patch_level = dset.attrs['patch_level']
-    print('patch size: {}x{} patch level: {}'.format(patch_size, patch_size, patch_level))
-    patch_size = tuple((np.array((patch_size, patch_size)) * wsi.level_downsamples[patch_level]).astype(np.int32))
-    print('ref patch size: {}x{}'.format(patch_size, patch_size))
 
-    if w*h > Image.MAX_IMAGE_PIXELS: 
+    if 'level0_patch_size' in dset.attrs.keys():
+        patch_size = tuple(int(v) for v in dset.attrs['level0_patch_size'])
+        print('patch size at level 0: {}x{}'.format(patch_size[0], patch_size[1]))
+    else:
+        patch_size = dset.attrs['patch_size']
+        patch_level = dset.attrs['patch_level']
+        print('patch size: {}x{} patch level: {}'.format(patch_size, patch_size, patch_level))
+        patch_size = tuple((np.array((patch_size, patch_size)) * wsi.level_downsamples[patch_level]).astype(np.int32))
+        print('ref patch size: {}x{}'.format(patch_size[0], patch_size[1]))
+
+    if w*h > Image.MAX_IMAGE_PIXELS:
         raise Image.DecompressionBombError("Visualization Downscale %d is too large" % downscale)
-    
+
     if alpha < 0 or alpha == -1:
         heatmap = Image.new(size=(w,h), mode="RGB", color=bg_color)
     else:
         heatmap = Image.new(size=(w,h), mode="RGBA", color=bg_color + (int(255 * alpha),))
-    
+
     heatmap = np.array(heatmap)
     heatmap = DrawMapFromCoords(heatmap, wsi_object, coords, patch_size, vis_level, indices=None, draw_grid=draw_grid)
-    
+
     file.close()
     return heatmap
 
-def SamplePatches(coords_file_path, save_file_path, wsi_object, 
-    patch_level=0, custom_downsample=1, patch_size=256, sample_num=100, seed=1, stitch=True, verbose=1, mode='w'):
+def SamplePatches(coords_file_path, save_file_path, wsi_object,
+    patch_level=0, custom_downsample=1, patch_size=224, sample_num=100, seed=1, stitch=True, verbose=1, mode='w'):
     file = h5py.File(coords_file_path, 'r')
     dset = file['coords']
     coords = dset[:]
 
     h5_patch_size = dset.attrs['patch_size']
     h5_patch_level = dset.attrs['patch_level']
-    
+
     if verbose>0:
         print('in .h5 file: total number of patches: {}'.format(len(coords)))
         print('in .h5 file: patch size: {}x{} patch level: {}'.format(h5_patch_size, h5_patch_size, h5_patch_level))
@@ -303,18 +414,18 @@ def SamplePatches(coords_file_path, save_file_path, wsi_object,
     indices = np.random.choice(np.arange(len(coords)), min(len(coords), sample_num), replace=False)
 
     target_patch_size = np.array([patch_size, patch_size])
-    
+
     if custom_downsample > 1:
         target_patch_size = (np.array([patch_size, patch_size]) / custom_downsample).astype(np.int32)
-        
+
     if stitch:
         canvas = Mosaic_Canvas(patch_size=target_patch_size[0], n=sample_num, downscale=4, n_per_row=10, bg_color=(0,0,0), alpha=-1)
     else:
         canvas = None
-    
+
     for idx in indices:
         coord = coords[idx]
-        patch = wsi_object.wsi.read_region(coord, patch_level, tuple([patch_size, patch_size])).convert('RGB')
+        patch = wsi_object.wsi.read_region(tuple(coord), patch_level, tuple([patch_size, patch_size])).convert('RGB')
         if custom_downsample > 1:
             patch = patch.resize(tuple(target_patch_size))
 

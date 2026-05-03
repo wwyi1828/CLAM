@@ -71,9 +71,24 @@ The **stitches** folder contains downsampled visualizations of stitched tissue p
 The auto-generated csv file **process_list_autogen.csv** contains a list of all slides processed, along with their segmentation/patching parameters used.
 
 Additional flags that can be passed include:
-* `--custom_downsample`: factor for custom downscale (not recommended, ideally should first check if native downsamples exist)
-* `--patch_level`: which downsample pyramid level to extract patches from (default is 0, the highest available resolution)
+* `--magnification_strategy {manual,bin,rescale}`: patch extraction strategy. If omitted, the scripts infer `bin` from `--target_magnification`, infer `rescale` from `--target_mpp`, and otherwise fall back to legacy `manual` mode.
+* `--target_magnification {20,40}`: canonical target magnification for `bin` mode. The slide is assigned to a 20x-like or 40x-like source bin from metadata and then patched toward this target.
+* `--target_mpp`: physical target scale for `rescale` mode. Patches are extracted to cover the same tissue area even when the source slide mpp is not a clean 20x/40x multiple.
+* `--custom_downsample`: manual mode only. Additional read-time resize factor.
+* `--patch_level`: manual mode only. Which native pyramid level to extract from.
 * `--no_auto_skip`: by default, the script will skip over files for which patched .h5 files already exist in the desination folder, this toggle can be used to override this behavior
+
+Examples:
+``` shell
+# Bin slides into canonical 20x/40x-like groups and target 20x output patches.
+python create_patches_fp.py --source DATA_DIRECTORY --save_dir RESULTS_DIRECTORY --patch_size 256 --seg --patch --target_magnification 20
+
+# Use true source mpp and rescale to a fixed physical target.
+python create_patches_fp.py --source DATA_DIRECTORY --save_dir RESULTS_DIRECTORY --patch_size 256 --seg --patch --target_mpp 0.5
+
+# Legacy manual mode remains available for advanced/debug usage.
+python create_patches_fp.py --source DATA_DIRECTORY --save_dir RESULTS_DIRECTORY --patch_size 256 --seg --patch --magnification_strategy manual --patch_level 0 --custom_downsample 2
+```
 
 Some parameter templates are also availble and can be readily deployed as good choices for default parameters:
 * `bwh_biopsy.csv`: used for segmenting biopsy slides scanned at BWH (Scanned using Hamamatsu S210 and Aperio GT450) 
